@@ -1,0 +1,194 @@
+# ai-translator 的配置。程序直接读仓库里的这个文件。
+# 改完保存即可，下次按快捷键生效。
+# API key 不写在这里。api_key_file 指向 ~/.config 下的密钥文件，本文件可以放进仓库。
+# 改了快捷键之后，再执行一次 `ai-translator install-shortcuts` 才会写进 GNOME。
+
+[api]
+# 当前使用的后端：cursor 或 deepseek。改完下次按快捷键生效。
+provider = "deepseek"
+# 单次等待的最长时间，单位秒。Cursor 第一次加载模型也算在里面。
+timeout_sec = 90
+
+[cursor]
+# 密钥文件路径。里面只放一行 Cursor API key，不要加引号。权限保持 0600。
+api_key_file = "~/.config/ai-translator/api_key"
+# 模型 id。composer-2.5 是当前默认。可改成 auto，或用 Cursor.models.list() 查到的 id。
+model = "composer-2.5"
+# true 用模型的快速档。第一次加载大约半分钟，之后在 agent_idle_sec 内复用。
+fast = true
+# 翻译进程把 Agent 留着复用的秒数。这段时间内再译大约数秒，空闲到期后进程退出。
+agent_idle_sec = 3600
+
+[deepseek]
+# 密钥文件路径。里面只放一行 DeepSeek API key，不要加引号。权限保持 0600。
+api_key_file = "~/.config/ai-translator/deepseek_key"
+# OpenAI 兼容接口。文档：https://api-docs.deepseek.com/zh-cn/
+base_url = "https://api.deepseek.com"
+# deepseek-flash 或 deepseek-v4-pro。flash 更快。
+model = "deepseek-flash"
+# false 关闭思考模式。翻译打开思考会慢很多。
+thinking = false
+
+[limits]
+# 不超过这个字数时给出多条候选。按 Unicode 字符计，含空格和换行。
+short_text_max_chars = 200
+# 超过这个字数直接取消，不向模型发请求。
+max_chars = 4000
+# 短文本的候选条数。
+short_candidate_count = 3
+# 超过 short_text_max_chars 时的候选条数。为 1 时使用名为「自然」的那一档。
+long_candidate_count = 1
+# 汉字 / (汉字 + 拉丁字母) 达到该比例时，只读界面把选区视为中文并直接退出。
+chinese_char_ratio = 0.6
+
+[ui]
+# Pango 字体描述，例如 "Sans 13"。
+font = "Sans 13"
+# 浮窗宽度，单位像素。
+width = 520
+# 粘贴之后等待目标程序读完剪贴板，再把原来的剪贴板放回去，单位毫秒。
+clipboard_restore_ms = 400
+# 向可编辑窗口发送 Ctrl+C 之后，等待选区出现的最长时间，单位毫秒。
+copy_wait_ms = 500
+
+[hotkeys]
+# GTK 快捷键写法。改完必须重新执行 install-shortcuts。
+# translate：中文和英文对翻。
+translate = "<Super>t"
+# polish：只润色同一种语言，不翻译。只读窗口里这个键什么都不做。
+polish = "<Super>i"
+
+[windows]
+# 窗口类名 WM_CLASS，大小写不敏感。查看方式：xprop WM_CLASS
+# 下面这些窗口可以互译、润色，并用数字键把候选粘贴回去，覆盖当前选区。
+# 可编辑窗口用 Ctrl+C 读取当前选区，不用上一次残留的选区。
+# 浏览器整窗只有一个 WM_CLASS，输入框和网页正文分不开。
+# 放进这份名单后，Mattermost 这类输入框可以互译并写回。
+# 划选的是网页正文时，按数字键会向当前焦点发送 Ctrl+V；正文本身通常吃不进去。
+editable_wm_class = [
+  "code",
+  "code-oss",
+  "code-insiders",
+  "codium",
+  "cursor",
+  "gedit",
+  "gnome-text-editor",
+  "org.gnome.texteditor",
+  "libreoffice-writer",
+  "libreoffice-calc",
+  "libreoffice-impress",
+  "libreoffice",
+  "soffice",
+  "mousepad",
+  "kate",
+  "sublime_text",
+  "obsidian",
+  "typora",
+  "wps",
+  "deepin-editor",
+  "pluma",
+  "xed",
+  "notepadqq",
+  "thunderbird",
+  "teams-for-linux",
+  "google-chrome",
+  "chromium",
+  "chromium-browser",
+  "firefox",
+  "firefox-esr",
+  "brave-browser",
+  "microsoft-edge",
+  "opera",
+  "vivaldi-stable"
+]
+
+# 这些窗口只做英文到中文，不写回，也不模拟 Ctrl+C / Ctrl+V。
+# 终端即使被写进 editable_wm_class，也不会注入按键。
+# 两个名单都没有的窗口同样按只读处理。
+readonly_wm_class = [
+  "gnome-terminal",
+  "gnome-terminal-server",
+  "kgx",
+  "kitty",
+  "alacritty",
+  "xterm",
+  "konsole",
+  "tilix",
+  "terminator",
+  "wezterm",
+  "xfce4-terminal",
+  "evince",
+  "atril",
+  "okular",
+  "zathura",
+  "xreader",
+  "mupdf"
+]
+
+[prompts]
+# 下面三段是发给模型的系统提示，保持英文。
+# 只支持占位符 {count} 和 {styles}。不要写别的花括号。
+# 英译中：直接翻译，不加工。
+# 中译英：多半是马上发给国外同事。中文往往太冲，英文改成礼貌、简单、直接，接近硅谷同事互发消息的口气。
+# 不保留原文的生硬，也不额外加客套、道歉或寒暄。
+translate_system = """
+You translate between Chinese and English.
+Keep code, AT commands such as AT+CWJAP, identifiers, and numbers unchanged.
+
+When the source is mainly English, translate it directly into Chinese.
+Do not soften it, do not add courtesy, and do not explain anything the source did not say.
+The candidates differ only in Chinese wording.
+
+When the source is mainly Chinese, the English will be sent as-is to a colleague abroad.
+Chinese at work is often blunt. Do not preserve that bluntness.
+Rewrite it into polite, simple, direct English, the way people write to each other at a Silicon Valley company.
+Polite means a request sounds like a request, not an order, and a problem report does not sound like blame.
+Simple means short sentences and plain words, with no literal idioms and no stiff translated prose.
+Direct means the point, and what you want them to do, is obvious, with no added praise, apology, or small talk.
+Keep the facts. Do not invent offers, deadlines, or feelings.
+
+Produce exactly {count} candidates, in this order:
+{styles}
+For Chinese into English, every candidate follows the rewrite rules above.
+The first is the more courteous wording, the middle is the message to send, and a later one is shorter.
+Do not add praise, apology, or small talk to any of them.
+If there is only one candidate, write the message you would paste into a chat.
+For English into Chinese, every candidate is a direct translation.
+
+Return a JSON object with the keys "direction" and "candidates".
+"direction" is "zh→en" or "en→zh".
+"candidates" must contain exactly {count} strings.
+Do not wrap the JSON in markdown. Do not add notes outside the JSON.
+"""
+
+translate_readonly_system = """
+The source is English. Translate it directly into Chinese.
+Do not soften it, do not add courtesy, and do not explain anything the source did not say.
+Keep code, AT commands such as AT+CWJAP, identifiers, and numbers unchanged.
+Return a JSON object with the keys "direction" and "candidates".
+"direction" must be "en→zh".
+"candidates" must contain exactly {count} strings, in this order:
+{styles}
+Do not wrap the JSON in markdown. Do not add notes outside the JSON.
+"""
+
+polish_system = """
+Polish the source in its own language. Do not translate.
+Chinese stays Chinese. English stays English.
+Keep code, AT commands such as AT+CWJAP, identifiers, and numbers unchanged.
+Return a JSON object with the keys "direction" and "candidates".
+"direction" is "zh" or "en".
+"candidates" must contain exactly {count} strings, in this order:
+{styles}
+Do not wrap the JSON in markdown. Do not add notes outside the JSON.
+"""
+
+# 浮窗上显示的档位名称。只有一条候选时，优先用名为「自然」的这一档。
+styles = ["礼貌", "自然", "精炼"]
+# 与 styles 一一对应。润色会把这些说明写进提示，所以用英文。
+# 互译提示自己定义每一档，不使用这里的说明。
+style_hints = [
+  "Polite workplace wording: a request sounds like a request, not an order. Keep the facts. Do not add praise, apology, or small talk.",
+  "Sound natural in the target language.",
+  "Shorter, and suitable for a document."
+]
