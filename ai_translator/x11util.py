@@ -31,29 +31,47 @@ def _run(args: list[str], data: bytes | None = None, timeout: float = 2) -> subp
         raise X11Error(f"找不到命令 {args[0]}") from exc
 
 
-def active_wm_class() -> tuple[str, str]:
-    """Return (instance, class). Both are empty when the window cannot be read."""
+def active_window() -> tuple[int, str, str]:
+    """Return (window id, instance, class). Zeros and empty strings when unreadable."""
     try:
         disp = xdisplay.Display()
     except Exception:
-        return "", ""
+        return 0, "", ""
     try:
         root = disp.screen().root
         prop = root.get_full_property(disp.intern_atom("_NET_ACTIVE_WINDOW"), X.AnyPropertyType)
         if prop is None or not prop.value:
-            return "", ""
-        window = disp.create_resource_object("window", prop.value[0])
+            return 0, "", ""
+        window_id = int(prop.value[0])
+        window = disp.create_resource_object("window", window_id)
         wm_class = window.get_full_property(disp.intern_atom("WM_CLASS"), X.AnyPropertyType)
         if wm_class is None or not wm_class.value:
-            return "", ""
+            return window_id, "", ""
         parts = [part.decode("utf-8", "replace") for part in bytes(wm_class.value).split(b"\x00") if part]
         instance = parts[0] if parts else ""
         klass = parts[1] if len(parts) > 1 else instance
-        return instance, klass
+        return window_id, instance, klass
     except Exception:
-        return "", ""
+        return 0, "", ""
     finally:
         disp.close()
+
+
+def active_wm_class() -> tuple[str, str]:
+    """Return (instance, class). Both are empty when the window cannot be read."""
+    _window_id, instance, klass = active_window()
+    return instance, klass
+
+
+def focus_window(window_id: int) -> bool:
+    """Raise a window and wait until it is active. False when it cannot be focused."""
+    if window_id <= 0:
+        return False
+    try:
+        result = _run(["xdotool", "windowactivate", "--sync", str(window_id)], timeout=1.5)
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
 
 
 def pointer_position() -> tuple[int, int]:
@@ -129,6 +147,10 @@ class ClipboardBackup:
             self.dirty = True
             atexit.register(self.restore)
 
+    def keep(self) -> None:
+        """Leave the clipboard as it is. A later restore must not replace it."""
+        self._restored = True
+
     def restore(self) -> None:
         if self._restored or not self.dirty:
             return
@@ -174,10 +196,17 @@ def capture_selection(surface: str, copy_wait_ms: int) -> tuple[str | None, Clip
     return None, backup
 
 
-def paste_text(text: str, backup: ClipboardBackup, restore_ms: int) -> None:
-    backup.mark_dirty()
+def paste_text(text: str, backup: ClipboardBackup, restore_ms: int, window_id: int = 0) -> None:
+    """Put text on the clipboard and, when the source window can be focused, paste there.
+
+    The chosen text stays on the clipboard. Ctrl+V is sent only after that
+    window is active, so a click in another window does not receive the paste.
+    """
+    backup.keep()
     write_clipboard(text)
+    time.sleep(0.05)
+    if not focus_window(window_id):
+        return
     time.sleep(0.05)
     send_key("ctrl+v")
     time.sleep(max(restore_ms, 0) / 1000)
-    backup.restore()

@@ -18,7 +18,7 @@ from ai_translator.policy import (
     decide,
 )
 from ai_translator.shortcuts import ShortcutError, install_shortcuts
-from ai_translator.x11util import X11Error, active_wm_class, capture_selection, release_modifiers
+from ai_translator.x11util import X11Error, active_window, capture_selection, release_modifiers
 from ai_translator import ui
 
 
@@ -59,7 +59,7 @@ def _run(mode: str) -> int:
         return 1
     try:
         release_modifiers()
-        instance, klass = active_wm_class()
+        window_id, instance, klass = active_window()
         surface = classify_surface(
             instance, klass, cfg.editable_wm_class, cfg.readonly_wm_class,
         )
@@ -94,7 +94,7 @@ def _run(mode: str) -> int:
             cfg.short_candidate_count,
             cfg.long_candidate_count,
         )
-        ui.interact(cfg, backup, action, surface, text, count, api_key)
+        ui.interact(cfg, backup, action, surface, text, count, api_key, window_id)
         return 0
     except (X11Error, OSError, RuntimeError) as exc:
         return _fail(cfg, str(exc))

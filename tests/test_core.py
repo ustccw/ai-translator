@@ -156,6 +156,35 @@ class ModelJsonTests(unittest.TestCase):
         self.assertEqual(items, ["one", "two"])
 
 
+class ClipboardTests(unittest.TestCase):
+    def test_keep_blocks_restore(self):
+        from unittest.mock import patch
+
+        from ai_translator.x11util import ClipboardBackup
+
+        backup = ClipboardBackup()
+        backup.had_text = True
+        backup.original = "old"
+        backup.dirty = True
+        backup.keep()
+        with patch("ai_translator.x11util.write_clipboard") as write:
+            backup.restore()
+        write.assert_not_called()
+
+    def test_failed_focus_leaves_clipboard_and_does_not_paste(self):
+        from unittest.mock import patch
+
+        from ai_translator.x11util import ClipboardBackup, paste_text
+
+        backup = ClipboardBackup()
+        with patch("ai_translator.x11util.write_clipboard") as write, \
+                patch("ai_translator.x11util.focus_window", return_value=False), \
+                patch("ai_translator.x11util.send_key") as key:
+            paste_text("译文", backup, 0, 42)
+        write.assert_called_once_with("译文")
+        key.assert_not_called()
+
+
 class ShortcutTests(unittest.TestCase):
     def test_merge_keeps_existing(self):
         existing = parse_strv("['/org/custom0/', '/org/custom1/']")

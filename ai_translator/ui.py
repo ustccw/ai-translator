@@ -43,6 +43,7 @@ class Popup:
         self.count = 1
         self.api_key = ""
         self.candidates: list[str] = []
+        self.source_window = 0
         self.pointer = pointer_position()
 
         self.window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
@@ -235,7 +236,7 @@ class Popup:
         while Gtk.events_pending():
             Gtk.main_iteration_do(False)
         try:
-            paste_text(text, self.backup, self.cfg.clipboard_restore_ms)
+            paste_text(text, self.backup, self.cfg.clipboard_restore_ms, self.source_window)
         finally:
             self.window.destroy()
             if Gtk.main_level() > 0:
@@ -258,12 +259,14 @@ class Popup:
         count: int,
         api_key: str,
         needs_privacy: bool,
+        window_id: int,
     ) -> None:
         self.action = action
         self.surface = surface
         self.source = source
         self.count = count
         self.api_key = api_key
+        self.source_window = window_id
         self.title.set_text(TITLES.get(action, "ai-translator"))
         if needs_privacy:
             self.phase = "privacy"
@@ -352,9 +355,9 @@ class Popup:
                 keys = "1" if len(candidates) == 1 else "1–" + str(len(candidates))
                 extra = " 或 Enter" if len(candidates) == 1 else ""
                 if not self.grabbed:
-                    self.hint.set_text(f"键盘抓取失败，请点击一条候选。Esc 取消")
+                    self.hint.set_text("键盘抓取失败，请点击一条候选。结果会留在剪贴板。Esc 取消")
                 else:
-                    self.hint.set_text(f"按 {keys}{extra} 替换选区，Esc 取消")
+                    self.hint.set_text(f"按 {keys}{extra} 替换原窗口选区，并留在剪贴板。Esc 取消")
             else:
                 self.hint.set_text("Esc 关闭")
         self._font_on(self.body)
@@ -426,9 +429,12 @@ def interact(
     source: str,
     count: int,
     api_key: str,
+    window_id: int = 0,
 ) -> None:
     needs_privacy = not cfg.privacy_ack_path().exists()
-    Popup(cfg, backup).present_request(action, surface, source, count, api_key, needs_privacy)
+    Popup(cfg, backup).present_request(
+        action, surface, source, count, api_key, needs_privacy, window_id,
+    )
 
 
 def available() -> bool:
