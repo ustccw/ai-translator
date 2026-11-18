@@ -2,7 +2,11 @@
 
 在 Ubuntu 桌面上划选文字，按快捷键，让模型给出译文或润色，再在原处替换选区。省掉「复制、切到网页、粘贴、再复制回来」这几步。
 
-只支持 GNOME 的 X11 会话。Wayland 不能用。登录界面选「Ubuntu on Xorg」。确认当前会话：
+## 环境
+
+Python 3.10 到 3.15。Ubuntu 22.04 或 24.04，使用 X11 会话，登录界面选「Ubuntu on Xorg」。快捷键写进 GNOME。
+
+不支持 Wayland。Ubuntu 26.04 的默认桌面是 Wayland，也不支持。确认当前会话：
 
 ```bash
 echo "$XDG_SESSION_TYPE"

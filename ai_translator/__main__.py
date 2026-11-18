@@ -22,6 +22,15 @@ from ai_translator.x11util import X11Error, active_window, capture_selection, re
 from ai_translator import ui
 
 
+def _runtime_error() -> str | None:
+    """Return a message when this process is outside the supported environment."""
+    if sys.version_info < (3, 10) or sys.version_info[:2] > (3, 15):
+        return "需要 Python 3.10 到 3.15。"
+    if os.environ.get("XDG_SESSION_TYPE") != "x11":
+        return "需要 X11 桌面。Ubuntu 22.04 和 24.04 请在登录界面选「Ubuntu on Xorg」。"
+    return None
+
+
 def _lock():
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if not runtime:
@@ -125,6 +134,10 @@ def _install() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    problem = _runtime_error()
+    if problem:
+        print(f"ai-translator: {problem}", file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(prog="ai-translator", description="划词后互译或润色，并可在可编辑窗口里写回。")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("translate", help="中文和英文对翻")

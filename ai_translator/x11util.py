@@ -1,7 +1,8 @@
 """Read the active window and the X11 selection, and paste with the keyboard.
 
-Clipboard owners must outlive this process: xclip is started in its own
-session so a later restore is still served after we exit.
+X11 only. Supported versions are in README.md. Clipboard owners must
+outlive this process: xclip is started in its own session so a later
+restore is still served after we exit.
 """
 
 from __future__ import annotations

@@ -185,6 +185,31 @@ class ClipboardTests(unittest.TestCase):
         key.assert_not_called()
 
 
+class RuntimeTests(unittest.TestCase):
+    def test_accepts_x11_on_supported_python(self):
+        import os
+        from unittest.mock import patch
+
+        from ai_translator.__main__ import _runtime_error
+
+        with patch("ai_translator.__main__.sys.version_info", (3, 12, 3)), \
+                patch.dict(os.environ, {"XDG_SESSION_TYPE": "x11"}):
+            self.assertIsNone(_runtime_error())
+
+    def test_rejects_wayland_and_old_python(self):
+        import os
+        from unittest.mock import patch
+
+        from ai_translator.__main__ import _runtime_error
+
+        with patch("ai_translator.__main__.sys.version_info", (3, 12, 0)), \
+                patch.dict(os.environ, {"XDG_SESSION_TYPE": "wayland"}):
+            self.assertIn("X11", _runtime_error())
+        with patch("ai_translator.__main__.sys.version_info", (3, 9, 0)), \
+                patch.dict(os.environ, {"XDG_SESSION_TYPE": "x11"}):
+            self.assertIn("3.10", _runtime_error())
+
+
 class ShortcutTests(unittest.TestCase):
     def test_merge_keeps_existing(self):
         existing = parse_strv("['/org/custom0/', '/org/custom1/']")
