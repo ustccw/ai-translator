@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 
@@ -45,6 +46,10 @@ class Popup:
         self.candidates: list[str] = []
         self.source_window = 0
         self.pointer = pointer_position()
+        self.user_moved = False
+        self._drag_offset: tuple[float, float] | None = None
+        self._pointer_grabbed = False
+        self._shaped = (0, 0)
 
         self.window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
         self.window.set_name("ai-translator")
@@ -56,20 +61,49 @@ class Popup:
         self.window.set_accept_focus(False)
         self.window.set_focus_on_map(False)
         self.window.set_type_hint(Gdk.WindowTypeHint.POPUP_MENU)
-        self.window.add_events(Gdk.EventMask.KEY_PRESS_MASK | Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.window.add_events(
+            Gdk.EventMask.KEY_PRESS_MASK
+            | Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+        )
         self.window.connect("key-press-event", self._on_key)
         self.window.connect("button-press-event", self._on_button)
+        self.window.connect("button-release-event", self._on_drag_release)
+        self.window.connect("motion-notify-event", self._on_drag_motion)
+        self.window.connect("size-allocate", self._on_size_allocate)
         self.window.connect("destroy", self._on_destroy)
 
-        self.outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self.outer.set_border_width(14)
-        self.outer.set_size_request(cfg.width, -1)
+        self.drag_bar = Gtk.EventBox()
+        self.drag_bar.get_style_context().add_class("drag-bar")
+        self.drag_bar.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.drag_bar.connect("button-press-event", self._on_drag_press)
+        self.drag_bar.connect("realize", lambda _widget: self._install_drag_cursor())
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header.set_border_width(8)
         self.title = Gtk.Label(xalign=0)
+        self.title.set_hexpand(True)
+        self.title.set_halign(Gtk.Align.START)
+        self.title.set_valign(Gtk.Align.CENTER)
         self.title.get_style_context().add_class("title")
+        self.close_button = Gtk.Button(label="×")
+        self.close_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.close_button.set_can_focus(False)
+        self.close_button.set_valign(Gtk.Align.CENTER)
+        self.close_button.get_style_context().add_class("close")
+        self.close_button.connect("clicked", lambda _button: self._finish(restore=True))
+        header.pack_start(self.title, True, True, 0)
+        header.pack_end(self.close_button, False, False, 0)
+        self.drag_bar.add(header)
+
+        self.content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.content.set_border_width(14)
+        self.content.set_size_request(cfg.width, -1)
         self.subtitle = Gtk.Label(xalign=0)
         self.subtitle.get_style_context().add_class("hint")
         self.subtitle.set_no_show_all(True)
-        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.body.get_style_context().add_class("candidates")
         self.hint = Gtk.Label(xalign=0)
         self.hint.get_style_context().add_class("hint")
         self.hint.set_line_wrap(True)
@@ -78,30 +112,48 @@ class Popup:
         self.scroll.set_propagate_natural_width(True)
         self.scroll.set_propagate_natural_height(True)
         self.scroll.add(self.body)
-        self.outer.pack_start(self.title, False, False, 0)
-        self.outer.pack_start(self.subtitle, False, False, 0)
-        self.outer.pack_start(self.scroll, True, True, 0)
-        self.outer.pack_start(self.hint, False, False, 0)
-        self.window.add(self.outer)
+        self.content.pack_start(self.subtitle, False, False, 0)
+        self.content.pack_start(self.scroll, True, True, 0)
+        self.content.pack_start(self.hint, False, False, 0)
+        shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        shell.pack_start(self.drag_bar, False, False, 0)
+        shell.pack_start(self.content, True, True, 0)
+        self.window.add(shell)
         self._apply_style()
 
     def _apply_style(self) -> None:
         provider = Gtk.CssProvider()
         provider.load_from_data(b"""
             #ai-translator {
-                background-color: #1e1e1e;
-                border: 1px solid #5a5a5a;
+                background-color: #222222;
+                border: 1px solid #3a3a3a;
+                border-radius: 6px;
             }
-            #ai-translator label { color: #f3f3f3; }
+            #ai-translator label { color: #dddddd; }
             #ai-translator .title { font-weight: bold; }
-            #ai-translator .hint { color: #a8a8a8; }
+            #ai-translator .hint { color: #999999; }
+            #ai-translator .drag-bar {
+                background-color: #1a1a1a;
+                border-bottom: 2px solid #F9690E;
+            }
             #ai-translator button {
                 background: transparent;
                 border: none;
                 border-radius: 4px;
                 padding: 6px 4px;
+                color: #dddddd;
             }
-            #ai-translator button:hover { background-color: #333333; }
+            #ai-translator button:hover { background-color: #2e2e2e; }
+            #ai-translator button.close {
+                padding: 0 6px;
+                min-width: 24px;
+                min-height: 24px;
+            }
+            #ai-translator .candidates .candidate:not(:first-child) {
+                border-top: 1px solid #3a3a3a;
+                margin-top: 8px;
+                padding-top: 8px;
+            }
         """)
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(),
@@ -143,6 +195,7 @@ class Popup:
             self.subtitle.hide()
         self._font_on(self.window)
         self._move_on_screen()
+        self._install_drag_cursor()
         Gdk.flush()
         self._grab()
 
@@ -166,6 +219,7 @@ class Popup:
                 return
 
     def _ungrab(self) -> None:
+        self._end_drag()
         if not self.grabbed:
             return
         seat = Gdk.Display.get_default().get_default_seat()
@@ -191,6 +245,8 @@ class Popup:
     def _on_button(self, _widget, event) -> bool:
         if event.button != 1:
             return False
+        if self._drag_offset is not None:
+            return True
         origin = self.window.get_window()
         if origin is None:
             return False
@@ -201,6 +257,109 @@ class Popup:
             self._finish(restore=True)
             return True
         return False
+
+    def _install_drag_cursor(self) -> None:
+        gdk_window = self.drag_bar.get_window()
+        display = self.window.get_display()
+        if gdk_window is None or display is None:
+            return
+        cursor = Gdk.Cursor.new_from_name(display, "move")
+        if cursor is None:
+            cursor = Gdk.Cursor.new_for_display(display, Gdk.CursorType.FLEUR)
+        gdk_window.set_cursor(cursor)
+
+    def _on_drag_press(self, _widget, event) -> bool:
+        if event.button != 1 or event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        origin_x, origin_y = self.window.get_position()
+        self._drag_offset = (event.x_root - origin_x, event.y_root - origin_y)
+        # Pointer only, and only while the bar is held. owner_events stays false
+        # so the release still arrives after the pointer leaves the bar. The
+        # keyboard grab is a different device, so number keys and Esc remain.
+        if not self._grab_pointer(event.time):
+            self._drag_offset = None
+        return True
+
+    def _grab_pointer(self, time_ms: int) -> bool:
+        display = Gdk.Display.get_default()
+        seat = display.get_default_seat() if display is not None else None
+        pointer = seat.get_pointer() if seat is not None else None
+        gdk_window = self.window.get_window()
+        if pointer is None or gdk_window is None:
+            return False
+        mask = Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK
+        status = pointer.grab(
+            gdk_window,
+            Gdk.GrabOwnership.APPLICATION,
+            False,
+            mask,
+            None,
+            time_ms,
+        )
+        if status != Gdk.GrabStatus.SUCCESS:
+            return False
+        self._pointer_grabbed = True
+        return True
+
+    def _on_drag_motion(self, _widget, event) -> bool:
+        if self._drag_offset is None:
+            return False
+        origin_x, origin_y = self._drag_offset
+        next_x = int(round(event.x_root - origin_x))
+        next_y = int(round(event.y_root - origin_y))
+        if (next_x, next_y) != self.window.get_position():
+            self.user_moved = True
+            self.window.move(next_x, next_y)
+        return True
+
+    def _on_drag_release(self, _widget, event) -> bool:
+        if self._drag_offset is None or event.button != 1:
+            return False
+        self._end_drag(event.time)
+        return True
+
+    def _end_drag(self, time_ms: int = Gdk.CURRENT_TIME) -> None:
+        grabbed = self._pointer_grabbed
+        self._drag_offset = None
+        self._pointer_grabbed = False
+        if not grabbed:
+            return
+        display = Gdk.Display.get_default()
+        seat = display.get_default_seat() if display is not None else None
+        pointer = seat.get_pointer() if seat is not None else None
+        if pointer is not None:
+            pointer.ungrab(time_ms)
+
+    def _on_size_allocate(self, _widget, allocation) -> None:
+        self._round_corners(allocation.width, allocation.height)
+
+    def _round_corners(self, width: int, height: int) -> None:
+        # An override-redirect window has no frame, so CSS radius does not
+        # clip it. The shape mask is what actually rounds the corners.
+        if (width, height) == self._shaped or width < 4 or height < 4:
+            return
+        gdk_window = self.window.get_window()
+        if gdk_window is None:
+            return
+        try:
+            import cairo
+
+            radius = min(6, width / 2, height / 2)
+            surface = cairo.ImageSurface(cairo.FORMAT_A8, width, height)
+            context = cairo.Context(surface)
+            context.new_sub_path()
+            context.arc(width - radius, radius, radius, -math.pi / 2, 0)
+            context.arc(width - radius, height - radius, radius, 0, math.pi / 2)
+            context.arc(radius, height - radius, radius, math.pi / 2, math.pi)
+            context.arc(radius, radius, radius, math.pi, 3 * math.pi / 2)
+            context.close_path()
+            context.set_source_rgba(0, 0, 0, 1)
+            context.fill()
+            region = Gdk.cairo_region_create_from_surface(surface)
+            gdk_window.shape_combine_region(region, 0, 0)
+        except Exception:
+            return
+        self._shaped = (width, height)
 
     def _on_key(self, _widget, event) -> bool:
         key = event.keyval
@@ -370,17 +529,25 @@ class Popup:
         box.pack_start(self._wrapped(f"{index + 1}  {name}", hint=True), False, False, 0)
         box.pack_start(self._wrapped(text), False, False, 0)
         if self.surface != "editable":
+            box.get_style_context().add_class("candidate")
             return box
         button = Gtk.Button()
         button.set_relief(Gtk.ReliefStyle.NONE)
         button.set_can_focus(False)
         button.set_hexpand(True)
         button.add(box)
+        button.get_style_context().add_class("candidate")
         button.connect("clicked", lambda _button, pos=index: self._choose(pos))
         return button
 
-    def _limit_height(self) -> None:
+    def _anchor(self) -> tuple[int, int]:
+        if self.user_moved:
+            return self.window.get_position()
         px, py = self.pointer
+        return px + 16, py + 16
+
+    def _limit_height(self) -> None:
+        px, py = self.window.get_position() if self.user_moved else self.pointer
         monitor = Gdk.Display.get_default().get_monitor_at_point(px, py)
         if monitor is None:
             return
@@ -392,8 +559,8 @@ class Popup:
         self._limit_height()
         natural = self.window.get_preferred_size()[1]
         width, height = natural.width, natural.height
-        px, py = self.pointer
-        monitor = Gdk.Display.get_default().get_monitor_at_point(px, py)
+        ax, ay = self._anchor()
+        monitor = Gdk.Display.get_default().get_monitor_at_point(ax, ay)
         if monitor is None:
             return
         geo = monitor.get_geometry()
@@ -401,8 +568,8 @@ class Popup:
         max_y = max(geo.y + 8, geo.y + geo.height - height - 8)
         self.window.resize(width, height)
         self.window.move(
-            min(max(px + 16, geo.x + 8), max_x),
-            min(max(py + 16, geo.y + 8), max_y),
+            min(max(ax, geo.x + 8), max_x),
+            min(max(ay, geo.y + 8), max_y),
         )
 
 
