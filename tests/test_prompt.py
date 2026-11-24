@@ -249,5 +249,216 @@ class ShortcutTests(unittest.TestCase):
         self.assertIn("[hotkeys]", text)
 
 
+class ResultWordingTests(unittest.TestCase):
+    def test_button_and_hint_follow_the_window(self):
+        from ai_translator.ui import apply_label, result_hint
+
+        self.assertEqual(apply_label("editable"), "替换")
+        self.assertEqual(apply_label("readonly"), "替换")
+        self.assertEqual(
+            result_hint("editable", 3),
+            "按 1\u20133 或点「替换」写回选区。Esc 取消",
+        )
+        self.assertEqual(
+            result_hint("editable", 1),
+            "按 1 或 Enter 或点「替换」写回选区。Esc 取消",
+        )
+        self.assertEqual(
+            result_hint("readonly", 3),
+            "按 1\u20133 或点「替换」复制到剪贴板。Esc 关闭",
+        )
+        self.assertEqual(
+            result_hint("readonly", 1),
+            "按 1 或 Enter 或点「替换」复制到剪贴板。Esc 关闭",
+        )
+
+    def test_selection_slice_and_words(self):
+        from ai_translator.ui import byte_to_char, char_to_byte, selection_slice, word_span
+
+        self.assertEqual(selection_slice("甲乙丙", 2, 0), "甲乙")
+        self.assertEqual(selection_slice("甲乙丙", 1, 1), "")
+        self.assertEqual(char_to_byte("甲乙", 1), 3)
+        self.assertEqual(byte_to_char("甲乙", 3), 1)
+        self.assertEqual(word_span("hello world", 1), (0, 5))
+        self.assertEqual(word_span("甲乙 丙", 1), (0, 2))
+        self.assertEqual(word_span("AT+CWJAP", 2), (2, 3))
+        self.assertEqual(word_span("AT+CWJAP", 4), (3, 8))
+
+    def test_partial_copy_survives_cancel(self):
+        from unittest.mock import patch
+
+        from ai_translator.ui import remember_partial_copy
+        from ai_translator.x11util import ClipboardBackup
+
+        kept = ClipboardBackup()
+        kept.had_text = True
+        kept.original = "old"
+        kept.dirty = True
+        with patch("ai_translator.ui.write_clipboard") as write:
+            self.assertFalse(remember_partial_copy(kept, ""))
+        write.assert_not_called()
+        with patch("ai_translator.x11util.write_clipboard") as write:
+            kept.restore()
+        write.assert_called_once_with("old")
+
+        copied = ClipboardBackup()
+        copied.had_text = True
+        copied.original = "old"
+        copied.dirty = True
+        with patch("ai_translator.ui.write_clipboard") as write:
+            self.assertTrue(remember_partial_copy(copied, "部分"))
+        write.assert_called_once_with("部分")
+        with patch("ai_translator.x11util.write_clipboard") as write:
+            copied.restore()
+        write.assert_not_called()
+
+    def test_copy_key_is_ctrl_c_or_insert(self):
+        from types import SimpleNamespace
+
+        from gi.repository import Gdk
+
+        from ai_translator.ui import _is_copy_key
+
+        ctrl = int(Gdk.ModifierType.CONTROL_MASK)
+        lock = int(Gdk.ModifierType.LOCK_MASK)
+        shift = int(Gdk.ModifierType.SHIFT_MASK)
+        self.assertTrue(_is_copy_key(SimpleNamespace(keyval=Gdk.KEY_c, state=ctrl)))
+        self.assertTrue(_is_copy_key(SimpleNamespace(keyval=Gdk.KEY_C, state=ctrl | lock)))
+        self.assertTrue(_is_copy_key(SimpleNamespace(keyval=Gdk.KEY_Insert, state=ctrl)))
+        self.assertFalse(_is_copy_key(SimpleNamespace(keyval=Gdk.KEY_c, state=ctrl | shift)))
+        self.assertFalse(_is_copy_key(SimpleNamespace(keyval=Gdk.KEY_c, state=0)))
+        self.assertFalse(_is_copy_key(SimpleNamespace(keyval=Gdk.KEY_v, state=ctrl)))
+
+
+class ResultPopupTests(unittest.TestCase):
+    def setUp(self):
+        import os
+
+        self.popup = None
+        if not os.environ.get("DISPLAY"):
+            self.skipTest("no display")
+        from ai_translator.config import load_config
+        from ai_translator.ui import Popup
+        from ai_translator.x11util import ClipboardBackup
+
+        try:
+            self.popup = Popup(load_config(), ClipboardBackup())
+        except RuntimeError as exc:
+            self.skipTest(str(exc))
+
+    def tearDown(self):
+        if self.popup is not None and not self.popup.closed:
+            self.popup.window.destroy()
+
+    def test_text_is_selectable_and_only_the_button_chooses(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from gi.repository import Gdk, Gtk
+
+        from ai_translator.ui import ResultText
+
+        popup = self.popup
+        popup.surface = "editable"
+        popup.phase = "results"
+        popup.candidates = ["甲乙丙丁", "第二"]
+        row = popup._candidate(0, "自然", "甲乙丙丁")
+        widgets = list(_walk(row))
+        view = next(w for w in widgets if isinstance(w, ResultText))
+        body = view.get_child()
+        buttons = [w for w in widgets if isinstance(w, Gtk.Button)]
+        parent = body.get_parent()
+        while parent is not None:
+            self.assertNotIsInstance(parent, Gtk.Button)
+            parent = parent.get_parent()
+        self.assertFalse(body.get_selectable())
+        self.assertTrue(row.get_style_context().has_class("candidate"))
+        self.assertEqual([button.get_label() for button in buttons], ["复制", "替换"])
+        self.assertFalse(buttons[0].get_can_focus())
+        self.assertEqual(
+            set(buttons[0].get_style_context().list_classes()),
+            set(buttons[1].get_style_context().list_classes()),
+        )
+        self.assertIn(view, popup._result_views)
+
+        view.select_range(1, 3)
+        self.assertEqual(view.selected_text(), "乙丙")
+        self.assertFalse(body.get_selectable())
+        with patch("ai_translator.ui.write_clipboard") as write:
+            popup._persist_any_selection()
+        write.assert_called_once_with("乙丙")
+        self.assertTrue(popup.backup._restored)
+        self.assertFalse(popup.closed)
+
+        called = []
+        popup._choose = lambda index: called.append(index)
+        with patch("ai_translator.ui.write_clipboard") as write:
+            buttons[0].emit("clicked")
+        write.assert_called_once_with("甲乙丙丁")
+        self.assertEqual(called, [])
+        self.assertFalse(popup.closed)
+        buttons[1].emit("clicked")
+        self.assertEqual(called, [0])
+        self.assertTrue(popup._on_key(None, SimpleNamespace(keyval=Gdk.KEY_2, state=0)))
+        self.assertEqual(called, [0, 1])
+
+        popup.surface = "readonly"
+        copied = popup._candidate(1, "精炼", "hello world")
+        copied_buttons = [w for w in _walk(copied) if isinstance(w, Gtk.Button)]
+        self.assertEqual([button.get_label() for button in copied_buttons], ["复制", "替换"])
+        other = next(w for w in _walk(copied) if isinstance(w, ResultText))
+        other.select_range(0, 5)
+        self.assertEqual(view.selected_text(), "")
+        self.assertEqual(other.selected_text(), "hello")
+
+    def test_window_copy_uses_the_selection_and_does_not_choose(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from gi.repository import Gdk, Gtk
+
+        from ai_translator.ui import ResultText
+
+        popup = self.popup
+        popup.surface = "readonly"
+        popup.phase = "results"
+        popup.candidates = ["甲乙丙丁"]
+        row = popup._candidate(0, "自然", "甲乙丙丁")
+        text = next(w for w in _walk(row) if isinstance(w, ResultText))
+        ctrl = int(Gdk.ModifierType.CONTROL_MASK)
+        with patch("ai_translator.ui.write_clipboard") as write:
+            self.assertTrue(popup._on_key(None, SimpleNamespace(keyval=Gdk.KEY_c, state=ctrl)))
+        write.assert_not_called()
+        self.assertFalse(popup.backup._restored)
+        text.select_range(0, 2)
+        called = []
+        popup._choose = lambda index: called.append(index)
+        with patch("ai_translator.ui.write_clipboard") as write:
+            handled = popup._on_key(None, SimpleNamespace(keyval=Gdk.KEY_c, state=ctrl))
+        self.assertTrue(handled)
+        write.assert_called_once_with("甲乙")
+        self.assertEqual(called, [])
+        self.assertFalse(popup.closed)
+        self.assertFalse(popup._on_key(None, SimpleNamespace(keyval=Gdk.KEY_a, state=ctrl)))
+        self.assertFalse(popup._on_key(None, SimpleNamespace(keyval=Gdk.KEY_Left, state=0)))
+        popup.candidates = ["甲乙丙丁", "乙", "丙"]
+        self.assertTrue(popup._on_key(None, SimpleNamespace(keyval=Gdk.KEY_Return, state=0)))
+        self.assertEqual(called, [])
+        popup.candidates = ["甲乙丙丁"]
+        self.assertTrue(popup._on_key(None, SimpleNamespace(keyval=Gdk.KEY_Return, state=0)))
+        self.assertEqual(called, [0])
+        self.assertTrue(text._on_key(text, SimpleNamespace(keyval=Gdk.KEY_a, state=ctrl)))
+        self.assertEqual(text.selected_text(), "甲乙丙丁")
+
+
+def _walk(widget):
+    yield widget
+    getter = getattr(widget, "get_children", None)
+    if getter is None:
+        return
+    for child in getter():
+        yield from _walk(child)
+
+
 if __name__ == "__main__":
     unittest.main()

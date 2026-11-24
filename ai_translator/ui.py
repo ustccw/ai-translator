@@ -26,6 +26,312 @@ def _heading(label: str) -> str:
     return f"ai-translator (v{__version__}) — {label}"
 
 
+def apply_label(_surface: str) -> str:
+    """Button that writes the whole candidate back. Same action as the number keys."""
+    return "替换"
+
+
+def result_hint(surface: str, count: int) -> str:
+    """Footer under a finished list of candidates."""
+    keys = "1" if count == 1 else "1–" + str(count)
+    extra = " 或 Enter" if count == 1 else ""
+    if surface == "editable":
+        action = "写回选区"
+        tail = "Esc 取消"
+    else:
+        action = "复制到剪贴板"
+        tail = "Esc 关闭"
+    return f"按 {keys}{extra} 或点「替换」{action}。{tail}"
+
+
+def selection_slice(text: str, start: int, end: int) -> str:
+    """Characters between two offsets. Either order is accepted."""
+    if start > end:
+        start, end = end, start
+    if start < 0 or end > len(text) or start >= end:
+        return ""
+    return text[start:end]
+
+
+def char_to_byte(text: str, index: int) -> int:
+    index = max(0, min(index, len(text)))
+    return len(text[:index].encode("utf-8"))
+
+
+def byte_to_char(text: str, byte_index: int) -> int:
+    raw = text.encode("utf-8")
+    byte_index = max(0, min(byte_index, len(raw)))
+    return len(raw[:byte_index].decode("utf-8"))
+
+
+def char_kind(ch: str) -> str:
+    if ch.isspace():
+        return "space"
+    if ch.isascii() and (ch.isalnum() or ch == "_"):
+        return "word"
+    code = ord(ch)
+    if (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0x3040 <= code <= 0x30FF
+        or 0xAC00 <= code <= 0xD7AF
+    ):
+        return "cjk"
+    return "other"
+
+
+def word_span(text: str, index: int) -> tuple[int, int]:
+    """Bounds of the word under a character offset. A double-click uses this."""
+    if not text:
+        return 0, 0
+    index = min(max(index, 0), len(text) - 1)
+    kind = char_kind(text[index])
+    if kind == "other":
+        return index, index + 1
+    start = index
+    while start > 0 and char_kind(text[start - 1]) == kind:
+        start -= 1
+    end = index + 1
+    while end < len(text) and char_kind(text[end]) == kind:
+        end += 1
+    return start, end
+
+
+def _color16(channel: int) -> int:
+    return channel * 257
+
+
+# Quiet steel blue. The popup is already dark; a loud orange block fights the bar accent.
+_SELECT_BG = (0x3A, 0x55, 0x70)
+_SELECT_FG = (0xF4, 0xF4, 0xF4)
+
+
+def remember_partial_copy(backup: ClipboardBackup, text: str) -> bool:
+    """Keep a partial copy after this process exits.
+
+    GTK's clipboard owner dies with the popup. xclip is started in its own
+    session. keep() stops Esc from putting the previous clipboard back.
+    """
+    if not text:
+        return False
+    backup.keep()
+    write_clipboard(text)
+    return True
+
+
+def _is_copy_key(event) -> bool:
+    mods = event.state & Gtk.accelerator_get_default_mod_mask()
+    if mods != Gdk.ModifierType.CONTROL_MASK:
+        return False
+    return event.keyval in (Gdk.KEY_c, Gdk.KEY_C, Gdk.KEY_Insert, Gdk.KEY_KP_Insert)
+
+
+class ResultText(Gtk.EventBox):
+    """Selectable candidate text that does not take the X11 PRIMARY selection.
+
+    A Gtk.Label with set_selectable(True) claims PRIMARY as soon as the
+    pointer highlights anything. The source window then drops its own
+    selection, and a later Ctrl+V inserts instead of replacing. This widget
+    paints the highlight itself and only writes the CLIPBOARD on an explicit
+    copy.
+    """
+
+    def __init__(self, text: str, width_chars: int, on_copy, on_claim) -> None:
+        super().__init__()
+        self._text = text
+        self._on_copy = on_copy
+        self._on_claim = on_claim
+        self._anchor = 0
+        self._start = 0
+        self._end = 0
+        self._dragging = False
+        self._grabbed = False
+        self.get_style_context().add_class("result-text")
+        self.set_can_focus(True)
+        self.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.BUTTON1_MOTION_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+        )
+        label = Gtk.Label(label=text, xalign=0)
+        label.set_line_wrap(True)
+        label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        label.set_max_width_chars(width_chars)
+        label.set_selectable(False)
+        label.set_hexpand(True)
+        self.add(label)
+        self._label = label
+        self.connect("realize", self._install_cursor)
+        self.connect("button-press-event", self._on_press)
+        self.connect("button-release-event", self._on_release)
+        self.connect("motion-notify-event", self._on_motion)
+        self.connect("key-press-event", self._on_key)
+        self.connect("destroy", self._on_destroy)
+
+    def selected_text(self) -> str:
+        return selection_slice(self._text, self._start, self._end)
+
+    def select_range(self, start: int, end: int) -> None:
+        self._anchor = start
+        self._set_range(start, end, claim=True)
+
+    def select_all(self) -> None:
+        self.select_range(0, len(self._text))
+
+    def clear_selection(self) -> None:
+        self._anchor = 0
+        self._set_range(0, 0, claim=False)
+
+    def _set_range(self, start: int, end: int, claim: bool) -> None:
+        if claim and start != end and self._on_claim is not None:
+            self._on_claim(self)
+        self._start = start
+        self._end = end
+        self._paint()
+
+    def _paint(self) -> None:
+        start, end = self._start, self._end
+        if start == end:
+            self._label.set_attributes(None)
+            return
+        if start > end:
+            start, end = end, start
+        attrs = Pango.AttrList()
+        byte_start = char_to_byte(self._text, start)
+        byte_end = char_to_byte(self._text, end)
+        background = Pango.attr_background_new(*(_color16(channel) for channel in _SELECT_BG))
+        foreground = Pango.attr_foreground_new(*(_color16(channel) for channel in _SELECT_FG))
+        background.start_index = byte_start
+        background.end_index = byte_end
+        foreground.start_index = byte_start
+        foreground.end_index = byte_end
+        attrs.insert(background)
+        attrs.insert(foreground)
+        self._label.set_attributes(attrs)
+
+    def _copy_selection(self) -> None:
+        text = self.selected_text()
+        if text and self._on_copy is not None:
+            self._on_copy(text)
+
+    def _select_word(self, index: int) -> None:
+        start, end = word_span(self._text, index)
+        self._anchor = start
+        self._set_range(start, end, claim=True)
+
+    def _char_at(self, x: float, y: float) -> int:
+        label = self._label
+        layout = label.get_layout()
+        if layout is None:
+            return 0
+        origin = label.translate_coordinates(self, 0, 0)
+        if origin is None:
+            return 0
+        off_x, off_y = label.get_layout_offsets()
+        point_x = int((x - origin[0] - off_x) * Pango.SCALE)
+        point_y = int((y - origin[1] - off_y) * Pango.SCALE)
+        _inside, index, trailing = layout.xy_to_index(point_x, point_y)
+        char = byte_to_char(self._text, index)
+        if trailing:
+            char = min(len(self._text), char + 1)
+        return char
+
+    def _on_press(self, _widget, event) -> bool:
+        if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
+            self._popup_menu(event)
+            return True
+        if event.button != 1:
+            return False
+        if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            self._dragging = False
+            self._select_word(self._char_at(event.x, event.y))
+            return True
+        if event.type == Gdk.EventType.TRIPLE_BUTTON_PRESS:
+            self._dragging = False
+            self.select_all()
+            return True
+        if event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        self.grab_focus()
+        index = self._char_at(event.x, event.y)
+        self._anchor = index
+        self._dragging = True
+        self._set_range(index, index, claim=False)
+        self._grab_pointer(event.time)
+        return True
+
+    def _on_motion(self, _widget, event) -> bool:
+        if not self._dragging:
+            return False
+        self._set_range(self._anchor, self._char_at(event.x, event.y), claim=True)
+        return True
+
+    def _on_release(self, _widget, event) -> bool:
+        if event.button != 1:
+            return False
+        self._dragging = False
+        self._ungrab(event.time)
+        return True
+
+    def _on_key(self, _widget, event) -> bool:
+        mods = event.state & Gtk.accelerator_get_default_mod_mask()
+        if mods == Gdk.ModifierType.CONTROL_MASK and event.keyval in (Gdk.KEY_a, Gdk.KEY_A):
+            self.select_all()
+            return True
+        return False
+
+    def _popup_menu(self, event) -> None:
+        menu = Gtk.Menu()
+        item = Gtk.MenuItem.new_with_mnemonic("复制(_C)")
+        item.set_sensitive(bool(self.selected_text()))
+        item.connect("activate", lambda *_item: self._copy_selection())
+        menu.append(item)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+
+    def _install_cursor(self, _widget) -> None:
+        gdk_window = self.get_window()
+        display = self.get_display()
+        if gdk_window is None or display is None:
+            return
+        cursor = Gdk.Cursor.new_from_name(display, "text")
+        if cursor is None:
+            cursor = Gdk.Cursor.new_for_display(display, Gdk.CursorType.XTERM)
+        gdk_window.set_cursor(cursor)
+
+    def _grab_pointer(self, time_ms: int) -> None:
+        display = self.get_display()
+        seat = display.get_default_seat() if display is not None else None
+        pointer = seat.get_pointer() if seat is not None else None
+        gdk_window = self.get_window()
+        if pointer is None or gdk_window is None:
+            return
+        mask = Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK
+        status = pointer.grab(
+            gdk_window,
+            Gdk.GrabOwnership.APPLICATION,
+            False,
+            mask,
+            None,
+            time_ms,
+        )
+        self._grabbed = status == Gdk.GrabStatus.SUCCESS
+
+    def _ungrab(self, time_ms: int) -> None:
+        if not self._grabbed:
+            return
+        self._grabbed = False
+        display = self.get_display()
+        seat = display.get_default_seat() if display is not None else None
+        pointer = seat.get_pointer() if seat is not None else None
+        if pointer is not None:
+            pointer.ungrab(time_ms)
+
+    def _on_destroy(self, _widget) -> None:
+        self._ungrab(Gdk.CURRENT_TIME)
+
+
 def _init_gtk() -> None:
     result = Gtk.init_check([])
     ok = result[0] if isinstance(result, tuple) else bool(result)
@@ -53,6 +359,7 @@ class Popup:
         self._drag_offset: tuple[float, float] | None = None
         self._pointer_grabbed = False
         self._shaped = (0, 0)
+        self._result_views: list[ResultText] = []
 
         self.window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
         self.window.set_name("ai-translator")
@@ -153,6 +460,21 @@ class Popup:
                 min-width: 24px;
                 min-height: 24px;
             }
+            #ai-translator button.quiet {
+                background-color: #2a2a2a;
+                border: 1px solid #4a4a4a;
+                border-radius: 4px;
+                padding: 0 10px;
+                min-width: 72px;
+                min-height: 24px;
+                color: #d0d0d0;
+            }
+            #ai-translator button.quiet label { color: #d0d0d0; }
+            #ai-translator button.quiet:hover {
+                background-color: #383838;
+                border-color: #6e6e6e;
+            }
+            #ai-translator .result-text:focus { outline: none; }
             #ai-translator .candidates .candidate:not(:first-child) {
                 border-top: 1px solid #3a3a3a;
                 margin-top: 8px;
@@ -175,6 +497,7 @@ class Popup:
                 self._font_on(child)
 
     def _clear_body(self) -> None:
+        self._result_views = []
         for child in list(self.body.get_children()):
             self.body.remove(child)
 
@@ -360,14 +683,21 @@ class Popup:
             return True
         if self.phase != "results":
             return True
-        if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and len(self.candidates) == 1:
-            self._choose(0)
+        # This handler runs before the focused label. Consume the keys that
+        # write a candidate back. Leave the rest so the label can extend the
+        # selection and so Ctrl+C here is not also handled again below.
+        if _is_copy_key(event):
+            self._persist_any_selection()
+            return True
+        if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
+            if len(self.candidates) == 1:
+                self._choose(0)
             return True
         number = _number_key(key)
         if number is not None:
             self._choose(number - 1)
             return True
-        return True
+        return False
 
     def _choose(self, index: int) -> None:
         if self.closed or not (0 <= index < len(self.candidates)):
@@ -457,29 +787,84 @@ class Popup:
             for index, text in enumerate(candidates):
                 name = names[index] if index < len(names) else str(index + 1)
                 self.body.pack_start(self._candidate(index, name, text), False, False, 0)
-            keys = "1" if len(candidates) == 1 else "1–" + str(len(candidates))
-            extra = " 或 Enter" if len(candidates) == 1 else ""
-            if self.surface == "editable":
-                self.hint.set_text(f"按 {keys}{extra} 替换原窗口选区，并留在剪贴板。Esc 取消")
-            else:
-                self.hint.set_text(f"按 {keys}{extra} 或点击，复制到剪贴板。Esc 关闭")
+            self.hint.set_text(result_hint(self.surface, len(candidates)))
         self._font_on(self.body)
         self.body.show_all()
         self._move_on_screen()
         return False
 
     def _candidate(self, index: int, name: str, text: str) -> Gtk.Widget:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        box.pack_start(self._wrapped(f"{index + 1}  {name}", hint=True), False, False, 0)
-        box.pack_start(self._wrapped(text), False, False, 0)
-        button = Gtk.Button()
+        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        row.get_style_context().add_class("candidate")
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title = self._wrapped(f"{index + 1}  {name}", hint=True)
+        title.set_valign(Gtk.Align.CENTER)
+        header.pack_start(title, True, True, 0)
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        copy = self._quiet_button("复制", lambda button, pos=index: self._copy_candidate(button, pos))
+        replace = self._quiet_button(
+            apply_label(self.surface),
+            lambda _button, pos=index: self._choose(pos),
+        )
+        actions.pack_start(copy, False, False, 0)
+        actions.pack_start(replace, False, False, 0)
+        header.pack_end(actions, False, False, 0)
+        row.pack_start(header, False, False, 0)
+        row.pack_start(self._result_text(text), False, False, 0)
+        return row
+
+    def _quiet_button(self, label: str, handler) -> Gtk.Button:
+        button = Gtk.Button(label=label)
         button.set_relief(Gtk.ReliefStyle.NONE)
         button.set_can_focus(False)
-        button.set_hexpand(True)
-        button.add(box)
-        button.get_style_context().add_class("candidate")
-        button.connect("clicked", lambda _button, pos=index: self._choose(pos))
+        button.set_valign(Gtk.Align.CENTER)
+        button.get_style_context().add_class("quiet")
+        button.connect("clicked", handler)
         return button
+
+    def _result_text(self, text: str) -> ResultText:
+        view = ResultText(
+            text,
+            max(24, self.cfg.width // 11),
+            on_copy=self._remember_text,
+            on_claim=self._claim_view,
+        )
+        self._result_views.append(view)
+        return view
+
+    def _copy_candidate(self, button: Gtk.Button, index: int) -> None:
+        """Copy one whole candidate and leave the popup open."""
+        if self.closed or not (0 <= index < len(self.candidates)):
+            return
+        if not remember_partial_copy(self.backup, self.candidates[index]):
+            return
+        previous = getattr(button, "_flash", 0)
+        if previous:
+            GLib.source_remove(previous)
+        button.set_label("已复制")
+
+        def restore() -> bool:
+            button._flash = 0
+            if button.get_parent() is not None:
+                button.set_label("复制")
+            return False
+
+        button._flash = GLib.timeout_add(800, restore)
+
+    def _remember_text(self, text: str) -> None:
+        remember_partial_copy(self.backup, text)
+
+    def _claim_view(self, view: ResultText) -> None:
+        for other in self._result_views:
+            if other is not view:
+                other.clear_selection()
+
+    def _persist_any_selection(self) -> None:
+        for view in self._result_views:
+            text = view.selected_text()
+            if text:
+                remember_partial_copy(self.backup, text)
+                return
 
     def _lift_if_flush(self, height: int) -> None:
         """Keep one text line between the grown window and the screen bottom.
