@@ -403,8 +403,11 @@ class Popup:
         self.close_button.set_valign(Gtk.Align.CENTER)
         self.close_button.get_style_context().add_class("close")
         self.close_button.connect("clicked", lambda _button: self._finish(restore=True))
+        self.refresh_button = self._quiet_button("刷新", lambda _button: self._retry())
+        self.refresh_button.set_no_show_all(True)
         header.pack_start(self.title, True, True, 0)
         header.pack_end(self.close_button, False, False, 0)
+        header.pack_end(self.refresh_button, False, False, 0)
         self.drag_bar.add(header)
 
         self.content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -777,6 +780,7 @@ class Popup:
             self.phase = "notice"
             self.body.pack_start(self._wrapped(payload[1] or "请求失败"), False, False, 0)
             self.hint.set_text("Esc 关闭")
+            self._reveal_refresh()
         else:
             _status, direction, names, candidates = payload
             self.candidates = candidates
@@ -788,6 +792,7 @@ class Popup:
                 name = names[index] if index < len(names) else str(index + 1)
                 self.body.pack_start(self._candidate(index, name, text), False, False, 0)
             self.hint.set_text(result_hint(self.surface, len(candidates)))
+            self._reveal_refresh()
         self._font_on(self.body)
         self.body.show_all()
         self._move_on_screen()
@@ -812,6 +817,27 @@ class Popup:
         row.pack_start(header, False, False, 0)
         row.pack_start(self._result_text(text), False, False, 0)
         return row
+
+    def _reveal_refresh(self) -> None:
+        self.refresh_button.set_sensitive(True)
+        self.refresh_button.show()
+
+    def _retry(self) -> None:
+        """Ask again with the same selection. The popup stays open."""
+        if self.closed or self.phase == "loading":
+            return
+        self.phase = "loading"
+        self.candidates = []
+        self.subtitle.set_text("")
+        self.subtitle.hide()
+        self.refresh_button.set_sensitive(False)
+        self._clear_body()
+        self.body.pack_start(self._wrapped("处理中…"), False, False, 0)
+        self.hint.set_text("Esc 取消")
+        self._font_on(self.body)
+        self.body.show_all()
+        self._move_on_screen()
+        self._start_thread()
 
     def _quiet_button(self, label: str, handler) -> Gtk.Button:
         button = Gtk.Button(label=label)

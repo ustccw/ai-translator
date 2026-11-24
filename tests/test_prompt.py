@@ -450,6 +450,43 @@ class ResultPopupTests(unittest.TestCase):
         self.assertTrue(text._on_key(text, SimpleNamespace(keyval=Gdk.KEY_a, state=ctrl)))
         self.assertEqual(text.selected_text(), "甲乙丙丁")
 
+    def test_refresh_retries_after_failure_or_results(self):
+        from unittest.mock import patch
+
+        from gi.repository import Gtk
+
+        popup = self.popup
+        popup.surface = "editable"
+        popup.phase = "loading"
+        self.assertFalse(popup.refresh_button.get_visible())
+        popup._on_result(("err", "超时"))
+        self.assertEqual(popup.phase, "notice")
+        self.assertEqual(popup.hint.get_text(), "Esc 关闭")
+        self.assertTrue(popup.refresh_button.get_visible())
+        self.assertTrue(popup.refresh_button.get_sensitive())
+        labels = [w.get_text() for w in _walk(popup.body) if isinstance(w, Gtk.Label)]
+        self.assertIn("超时", labels)
+
+        with patch.object(popup, "_start_thread") as start:
+            popup.refresh_button.emit("clicked")
+            popup.refresh_button.emit("clicked")
+        start.assert_called_once()
+        self.assertEqual(popup.phase, "loading")
+        self.assertFalse(popup.refresh_button.get_sensitive())
+        self.assertEqual(popup.hint.get_text(), "Esc 取消")
+        loading = [w.get_text() for w in _walk(popup.body) if isinstance(w, Gtk.Label)]
+        self.assertIn("处理中…", loading)
+
+        popup._on_result(("ok", "zh→en", ["自然"], ["hello"]))
+        self.assertEqual(popup.phase, "results")
+        self.assertTrue(popup.refresh_button.get_sensitive())
+        self.assertEqual(popup.subtitle.get_text(), "zh→en")
+        with patch.object(popup, "_start_thread") as start:
+            popup._retry()
+        start.assert_called_once()
+        self.assertEqual(popup.candidates, [])
+        self.assertEqual(popup.subtitle.get_text(), "")
+
 
 def _walk(widget):
     yield widget
